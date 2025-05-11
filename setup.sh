@@ -1,16 +1,24 @@
 #!/bin/bash
 
-# --- Konfigurasi ---
+# --- Konfigurasi Utama ---
 USERNAME="riyan"
 PASSWORD="saputra"
 DOMAIN="riyan200324.duckdns.org"
 BUG_HOST="dev.appsflyer.com"
 WS_PORT=8888
 
-# --- Update dan Install ---
+# --- Fungsi: Cek dan hentikan proses di port 80 ---
+echo "[✔] Mengecek port 80..."
+PORT80_PID=$(lsof -t -i :80)
+if [[ -n "$PORT80_PID" ]]; then
+    echo "[!] Port 80 digunakan oleh PID: $PORT80_PID. Mematikan..."
+    kill -9 $PORT80_PID
+fi
+
+# --- Update sistem dan install dependensi ---
 apt update && apt install -y nginx python3 python3-pip python3-venv certbot python3-certbot-nginx
 
-# --- Tambahkan user SSH ---
+# --- Tambah user SSH ---
 id "$USERNAME" &>/dev/null || useradd -m -s /bin/bash "$USERNAME"
 echo "$USERNAME:$PASSWORD" | chpasswd
 
@@ -20,6 +28,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install websockets paramiko pycryptodome
 
+# Buat server Python
 cat > ssh_ws_server.py <<EOF
 import asyncio, websockets, paramiko
 async def handle_client(websocket):
@@ -44,7 +53,7 @@ async def main():
 asyncio.run(main())
 EOF
 
-# --- Systemd service ---
+# Systemd service
 cat > /etc/systemd/system/ssh_ws.service <<EOF
 [Unit]
 Description=SSH over WebSocket
@@ -64,7 +73,7 @@ systemctl daemon-reload
 systemctl enable ssh_ws
 systemctl restart ssh_ws
 
-# --- Nginx config (tanpa SSL dulu agar certbot bisa jalan) ---
+# Nginx HTTP config sementara (tanpa SSL)
 cat > /etc/nginx/sites-available/ssh_ws <<EOF
 server {
     listen 80;
@@ -80,14 +89,17 @@ server {
 }
 EOF
 
-ln -s /etc/nginx/sites-available/ssh_ws /etc/nginx/sites-enabled/
-nginx -t && systemctl reload nginx
+ln -s /etc/nginx/sites-available/ssh_ws /etc/nginx/sites-enabled/ 2>/dev/null || true
+nginx -t && systemctl restart nginx
 
-# --- Request SSL ---
+# Jalankan certbot
+echo "[✔] Menjalankan certbot..."
 certbot --nginx --non-interactive --agree-tos --email admin@$DOMAIN -d $DOMAIN -d $BUG_HOST
 
-# --- Ubah Nginx ke HTTPS setelah SSL valid ---
-cat > /etc/nginx/sites-available/ssh_ws <<EOF
+# Jika sertifikat sukses, ubah nginx ke HTTPS
+if [[ -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]]; then
+    echo "[✔] Sertifikat SSL ditemukan, update ke HTTPS..."
+    cat > /etc/nginx/sites-available/ssh_ws <<EOF
 server {
     listen 443 ssl;
     server_name $DOMAIN $BUG_HOST;
@@ -104,13 +116,17 @@ server {
     }
 }
 EOF
+    nginx -t && systemctl reload nginx
+    echo "[✅] Nginx berhasil disetel ulang dengan SSL."
+else
+    echo "[❌] Gagal mendapatkan sertifikat SSL. Nginx tetap jalan di port 80 (HTTP)."
+fi
 
-nginx -t && systemctl reload nginx
-
-echo -e "\n✅ Installasi selesai!"
-echo "🔗 Connect via WSS (WebSocket over SSL):"
-echo "   Host/IP  : $BUG_HOST"
-echo "   Port     : 443"
-echo "   Path     : /ssh_ws/"
-echo "   Username : $USERNAME"
-echo "   Password : $PASSWORD"
+# Output Info
+echo -e "\n🎉 Selesai!"
+echo "🔗 SSH WebSocket Info:"
+echo "  Host     : $BUG_HOST"
+echo "  Port     : 443 (jika SSL berhasil) atau 80 (jika gagal)"
+echo "  Path     : /ssh_ws/"
+echo "  Username : $USERNAME"
+echo "  Password : $PASSWORD"
